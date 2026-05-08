@@ -1,0 +1,11 @@
+# Python rác
+backend/.venv/
+backend/__pycache__/
+backend/temp_images/
+backend/static_audio/
+backend/weights/*.pth
+
+# Node.js rác
+frontend/node_modules/
+frontend/dist/
+.DS_Store
