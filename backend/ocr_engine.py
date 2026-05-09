@@ -1,52 +1,67 @@
+from __future__ import annotations
+
 import os
-from dotenv import load_dotenv
-import google.generativeai as genai
+from pathlib import Path
 
-# pyrefly: ignore [missing-import]
 import cv2
-# pyrefly: ignore [missing-import]
 import numpy as np
-# pyrefly: ignore [missing-import]
+from dotenv import load_dotenv
 from paddleocr import PaddleOCR
-# pyrefly: ignore [missing-import]
 from PIL import Image
-# pyrefly: ignore [missing-import]
-from vietocr.tool.predictor import Predictor
-# pyrefly: ignore [missing-import]
 from vietocr.tool.config import Cfg
+from vietocr.tool.predictor import Predictor
 
-# Khởi tạo PaddleOCR v3 (chỉ dùng để detection, bỏ các tham số cũ không còn hỗ trợ)
-paddle_ocr = PaddleOCR(lang='vi', use_doc_orientation_classify=False, use_doc_unwarping=False)
+try:
+    from .document_detector import extract_document_region
+except ImportError:
+    from document_detector import extract_document_region
 
-# Cấu hình VietOCR để nhận diện chữ Việt chính xác hơn
-config = Cfg.load_config_from_name('vgg_transformer')
-config['device'] = 'cpu'
-config['weights'] = 'weights/vgg_transformer.pth'
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+
+BASE_DIR = Path(__file__).resolve().parent
+VIETOCR_WEIGHTS = BASE_DIR / "weights" / "vgg_transformer.pth"
+
+# PaddleOCR is kept for text-line detection. The YOLO model only prepares the
+# camera image by finding the document region first.
+paddle_ocr = PaddleOCR(
+    lang="vi",
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+)
+
+config = Cfg.load_config_from_name("vgg_transformer")
+config["device"] = os.getenv("OCR_DEVICE", "cpu")
+config["weights"] = str(VIETOCR_WEIGHTS)
 vietocr_model = Predictor(config)
-load_dotenv()
+
+load_dotenv(BASE_DIR / ".env")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if GEMINI_API_KEY and GEMINI_API_KEY != "your_api_key_here":
+if genai and GEMINI_API_KEY and GEMINI_API_KEY != "your_api_key_here":
     genai.configure(api_key=GEMINI_API_KEY)
-    # Sử dụng model nhanh và rẻ nhất hiện có
-    gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+    gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 else:
     gemini_model = None
 
+
 def correct_text_with_gemini(text: str) -> str:
-    """Gửi toàn bộ văn bản cho Gemini để sửa lỗi chính tả theo ngữ cảnh."""
+    """Correct OCR spelling without changing the content."""
     if not gemini_model or not text.strip():
         return text
+
     try:
         prompt = f"""
 Bạn là một chuyên gia sửa lỗi chính tả văn bản tiếng Việt.
-Dưới đây là một đoạn văn bản được quét bằng công nghệ OCR. Nó có thể chứa các lỗi chính tả do AI nhìn nhầm dấu (ví dụ: 'đề đề xuất' thay vì 'để đề xuất', 'hiên có' thay vì 'hiện có').
-Các đoạn văn bản, bài báo hoặc các khối thông tin riêng biệt đã được hệ thống phân tách bằng dấu chấm và dấu xuống dòng (.\n\n).
-Hãy sửa lại các lỗi chính tả cho chuẩn xác dựa theo ngữ cảnh câu.
-YÊU CẦU QUAN TRỌNG:
-1. TUYỆT ĐỐI KHÔNG tự ý thêm, bớt, bịa đặt hay tóm tắt nội dung.
-2. KHÔNG trả lời hay giải thích, CHỈ in ra văn bản sau khi đã sửa.
-3. BẮT BUỘC PHẢI GIỮ NGUYÊN các dấu chấm (.) và dấu xuống dòng (\n\n) ở cuối mỗi đoạn để hệ thống phát âm (gTTS) có thể ngắt nhịp nghỉ dài hợp lý cho người khiếm thị.
+Dưới đây là đoạn văn bản được quét bằng OCR. Nó có thể chứa lỗi do AI nhìn nhầm dấu, chữ hoặc khoảng trắng.
+
+Yêu cầu:
+1. Không thêm, bớt, bịa đặt, tóm tắt hoặc diễn giải nội dung.
+2. Chỉ trả về văn bản sau khi sửa, không giải thích.
+3. Giữ nguyên dấu chấm và xuống dòng giữa các đoạn để hệ thống đọc thành tiếng có nhịp nghỉ tự nhiên.
 
 Văn bản thô:
 {text}
@@ -54,144 +69,245 @@ Văn bản thô:
         response = gemini_model.generate_content(prompt)
         if response.text:
             return response.text.strip()
-    except Exception as e:
-        print(f"Gemini API Error: {e}")
+    except Exception as exc:
+        print(f"Gemini API Error: {exc}")
+
     return text
 
+
 def process_image(image_path: str) -> str:
-    # 1. Dùng PaddleOCR để tìm vị trí các dòng chữ
-    results = paddle_ocr.ocr(image_path, cls=False)
-    
-    if not results or not results[0]:
-        return "Không tìm thấy văn bản."
+    source_path = Path(image_path)
+    source_image = cv2.imread(str(source_path))
+    if source_image is None:
+        return "Không đọc được ảnh."
 
-    page_result = results[0]
-    boxes = []
-    
-    # PaddleOCR trả về mảng kết quả, ta lấy phần tọa độ (bounding box)
-    for item in page_result:
-        # Cấu trúc: [ [[x1, y1], [x2, y2], ...], ('text', score) ]
-        if isinstance(item, list) and len(item) == 2 and isinstance(item[1], tuple):
-            boxes.append(item[0])
-        # Nếu chỉ detect, cấu trúc: [[x1, y1], [x2, y2], ...]
-        elif isinstance(item, list) and len(item) == 4 and isinstance(item[0], list):
-            boxes.append(item)
+    document_image, detection_info = extract_document_region(source_image)
+    candidate_paths: list[Path] = []
+    cleanup_paths: list[Path] = []
 
+    if detection_info.get("status") == "detected":
+        document_path = _write_temp_document_image(source_path, document_image)
+        if document_path:
+            candidate_paths.append(document_path)
+            cleanup_paths.append(document_path)
+
+    # Fallback keeps recall high when the segmentation model misses or crops too tightly.
+    candidate_paths.append(source_path)
+
+    try:
+        for candidate_path in candidate_paths:
+            raw_text = _recognize_text(candidate_path)
+            if raw_text:
+                return correct_text_with_gemini(raw_text)
+    finally:
+        for path in cleanup_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    return "Không tìm thấy văn bản."
+
+
+def _write_temp_document_image(source_path: Path, image: np.ndarray) -> Path | None:
+    output_path = source_path.with_name(f"{source_path.stem}_document{source_path.suffix}")
+    try:
+        if cv2.imwrite(str(output_path), image):
+            return output_path
+    except Exception as exc:
+        print(f"Cannot write document crop: {exc}")
+    return None
+
+
+def _recognize_text(image_path: Path) -> str:
+    boxes = _detect_text_boxes(image_path)
     if not boxes:
-        return "Không tìm thấy văn bản."
+        return ""
 
-    # 2. Sử dụng thuật toán XY-Cut để phân tích bố cục đa cột
-    def xy_cut_sort(box_list):
-        if not box_list:
-            return []
-        
-        rects = []
-        for b in box_list:
-            xs = [pt[0] for pt in b]
-            ys = [pt[1] for pt in b]
-            rects.append({
-                'box': b,
-                'xmin': min(xs),
-                'xmax': max(xs),
-                'ymin': min(ys),
-                'ymax': max(ys)
-            })
-            
-        def recursive_xy_cut(current_rects):
-            if not current_rects:
-                return []
-            if len(current_rects) == 1:
-                return [current_rects[0]['box']]
-                
-            # ƯU TIÊN 1: Cố gắng cắt dọc (X-Cut) để chia cột báo
-            current_rects.sort(key=lambda r: r['xmin'])
-            x_gaps = []
-            max_xmax = current_rects[0]['xmax']
-            for i in range(1, len(current_rects)):
-                gap = current_rects[i]['xmin'] - max_xmax
-                if gap > -5: # Tolerance
-                    x_gaps.append((gap, i))
-                max_xmax = max(max_xmax, current_rects[i]['xmax'])
-                
-            if x_gaps:
-                x_gaps.sort(key=lambda g: g[0], reverse=True)
-                cut_index = x_gaps[0][1]
-                return recursive_xy_cut(current_rects[:cut_index]) + recursive_xy_cut(current_rects[cut_index:])
+    boxes = _xy_cut_sort(boxes)
+    image = cv2.imread(str(image_path))
+    if image is None:
+        return ""
 
-            # ƯU TIÊN 2: Nếu không cắt dọc được, cố gắng cắt ngang (Y-Cut) để chia hàng/block
-            current_rects.sort(key=lambda r: r['ymin'])
-            y_gaps = []
-            max_ymax = current_rects[0]['ymax']
-            for i in range(1, len(current_rects)):
-                gap = current_rects[i]['ymin'] - max_ymax
-                if gap > -5: 
-                    y_gaps.append((gap, i))
-                max_ymax = max(max_ymax, current_rects[i]['ymax'])
-                
-            if y_gaps:
-                y_gaps.sort(key=lambda g: g[0], reverse=True)
-                cut_index = y_gaps[0][1]
-                return recursive_xy_cut(current_rects[:cut_index]) + recursive_xy_cut(current_rects[cut_index:])
-                
-            # Fallback nếu các box hoàn toàn dính lẹo vào nhau
-            current_rects.sort(key=lambda r: (r['ymin'], r['xmin']))
-            return [r['box'] for r in current_rects]
-
-        return recursive_xy_cut(rects)
-
-    boxes = xy_cut_sort(boxes)
-
-    # 3. Cắt từng dòng và nhận diện bằng VietOCR
-    img = cv2.imread(image_path)
-    texts = []
+    texts: list[str] = []
     prev_box = None
 
     for box in boxes:
-        pts = np.array(box, dtype=np.int32)
-        x, y, w, h = cv2.boundingRect(pts)
-        
-        # Thêm padding (mở rộng vùng cắt) để không cắt mất dấu tiếng Việt ở trên/dưới
-        pad_y = int(h * 0.15)  # Mở rộng 15% chiều cao lên trên và xuống dưới
-        pad_x = int(w * 0.02)  # Mở rộng một chút chiều ngang
-        
-        y1 = max(0, y - pad_y)
-        y2 = min(img.shape[0], y + h + pad_y)
-        x1 = max(0, x - pad_x)
-        x2 = min(img.shape[1], x + w + pad_x)
+        crop = _crop_text_line(image, box)
+        if crop is None or crop.size == 0:
+            continue
 
-        crop = img[y1:y2, x1:x2]
-        
-        if crop.size > 0:
-            pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            text = vietocr_model.predict(pil_img)
-            if text and text.strip():
-                text = text.strip()
-                if prev_box is not None:
-                    # Tính khoảng cách so với box liền trước để phát hiện chuyển đoạn/cột
-                    pxs = [pt[0] for pt in prev_box]
-                    pys = [pt[1] for pt in prev_box]
-                    p_xmin, p_ymin = min(pxs), min(pys)
-                    p_ymax = max(pys)
-                    line_height = max(1, p_ymax - p_ymin)
-                    
-                    y_gap = y - p_ymax
-                    x_jump = abs(x - p_xmin)
-                    jumped_up = y < p_ymin - line_height * 0.5 # Nếu đọc ngược lên trên -> chắc chắn là sang cột mới
-                    
-                    # Nếu cách nhau quá xa theo trục Y (đoạn mới), hoặc nhảy ngược lên trên (cột mới), hoặc cách nhau cực xa trục X
-                    if y_gap > line_height * 0.5 or jumped_up or x_jump > line_height * 4:
-                        texts.append(".\n\n") # Thêm dấu chấm và xuống dòng để gTTS ngắt nghỉ dài
-                    else:
-                        texts.append(" ") # Cùng một đoạn thì cách nhau 1 khoảng trắng
-                
-                texts.append(text)
-                prev_box = box
+        pil_image = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        text = vietocr_model.predict(pil_image)
+        if not text or not text.strip():
+            continue
 
-    final_text = "".join(texts)
-    
-    if final_text:
-        # Xử lý hậu kỳ toàn bộ văn bản một lần duy nhất bằng Gemini
-        corrected_text = correct_text_with_gemini(final_text)
-        return corrected_text
-    else:
-        return "Không tìm thấy văn bản."
+        text = text.strip()
+        if prev_box is not None:
+            texts.append(_separator_between(prev_box, box))
+
+        texts.append(text)
+        prev_box = box
+
+    return "".join(texts).strip()
+
+
+def _detect_text_boxes(image_path: Path) -> list[list[list[float]]]:
+    results = paddle_ocr.ocr(str(image_path), cls=False)
+    boxes: list[list[list[float]]] = []
+
+    for item in _iter_ocr_items(results):
+        if isinstance(item, dict):
+            polys = item.get("dt_polys")
+            if polys is None:
+                polys = item.get("rec_polys")
+            if polys is not None:
+                boxes.extend(_normalize_polys(polys))
+            continue
+
+        if not isinstance(item, (list, tuple)):
+            continue
+
+        # Old PaddleOCR format: [box, ("text", score)].
+        if (
+            len(item) == 2
+            and isinstance(item[1], (tuple, list))
+            and len(item[1]) >= 2
+            and isinstance(item[1][0], str)
+        ):
+            boxes.append(_normalize_box(item[0]))
+            continue
+
+        # Detection-only format: [[x1, y1], [x2, y2], ...].
+        if len(item) == 4 and isinstance(item[0], (list, tuple, np.ndarray)):
+            boxes.append(_normalize_box(item))
+
+    return [box for box in boxes if len(box) >= 4]
+
+
+def _iter_ocr_items(results):
+    if not results:
+        return
+
+    if isinstance(results, dict):
+        yield results
+        return
+
+    for page in results:
+        if isinstance(page, dict):
+            yield page
+        elif isinstance(page, (list, tuple)):
+            for item in page:
+                yield item
+
+
+def _normalize_polys(polys) -> list[list[list[float]]]:
+    normalized = []
+    for poly in polys:
+        box = _normalize_box(poly)
+        if len(box) >= 4:
+            normalized.append(box)
+    return normalized
+
+
+def _normalize_box(box) -> list[list[float]]:
+    array = np.asarray(box, dtype=np.float32).reshape(-1, 2)
+    return array.tolist()
+
+
+def _xy_cut_sort(box_list: list[list[list[float]]]) -> list[list[list[float]]]:
+    if not box_list:
+        return []
+
+    rects = []
+    for box in box_list:
+        xs = [point[0] for point in box]
+        ys = [point[1] for point in box]
+        rects.append(
+            {
+                "box": box,
+                "xmin": min(xs),
+                "xmax": max(xs),
+                "ymin": min(ys),
+                "ymax": max(ys),
+            }
+        )
+
+    return _recursive_xy_cut(rects)
+
+
+def _recursive_xy_cut(rects: list[dict]) -> list[list[list[float]]]:
+    if not rects:
+        return []
+    if len(rects) == 1:
+        return [rects[0]["box"]]
+
+    rects = sorted(rects, key=lambda item: item["xmin"])
+    x_gaps = []
+    max_xmax = rects[0]["xmax"]
+    for index in range(1, len(rects)):
+        gap = rects[index]["xmin"] - max_xmax
+        if gap > -5:
+            x_gaps.append((gap, index))
+        max_xmax = max(max_xmax, rects[index]["xmax"])
+
+    if x_gaps:
+        _, cut_index = max(x_gaps, key=lambda item: item[0])
+        return _recursive_xy_cut(rects[:cut_index]) + _recursive_xy_cut(rects[cut_index:])
+
+    rects = sorted(rects, key=lambda item: item["ymin"])
+    y_gaps = []
+    max_ymax = rects[0]["ymax"]
+    for index in range(1, len(rects)):
+        gap = rects[index]["ymin"] - max_ymax
+        if gap > -5:
+            y_gaps.append((gap, index))
+        max_ymax = max(max_ymax, rects[index]["ymax"])
+
+    if y_gaps:
+        _, cut_index = max(y_gaps, key=lambda item: item[0])
+        return _recursive_xy_cut(rects[:cut_index]) + _recursive_xy_cut(rects[cut_index:])
+
+    rects = sorted(rects, key=lambda item: (item["ymin"], item["xmin"]))
+    return [rect["box"] for rect in rects]
+
+
+def _crop_text_line(image: np.ndarray, box: list[list[float]]) -> np.ndarray | None:
+    points = np.asarray(box, dtype=np.int32)
+    x, y, width, height = cv2.boundingRect(points)
+
+    pad_y = int(height * 0.15)
+    pad_x = int(width * 0.02)
+
+    y1 = max(0, y - pad_y)
+    y2 = min(image.shape[0], y + height + pad_y)
+    x1 = max(0, x - pad_x)
+    x2 = min(image.shape[1], x + width + pad_x)
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return image[y1:y2, x1:x2]
+
+
+def _separator_between(prev_box: list[list[float]], current_box: list[list[float]]) -> str:
+    prev_xs = [point[0] for point in prev_box]
+    prev_ys = [point[1] for point in prev_box]
+    current_xs = [point[0] for point in current_box]
+    current_ys = [point[1] for point in current_box]
+
+    prev_xmin = min(prev_xs)
+    prev_ymin = min(prev_ys)
+    prev_ymax = max(prev_ys)
+    current_xmin = min(current_xs)
+    current_ymin = min(current_ys)
+
+    line_height = max(1, prev_ymax - prev_ymin)
+    y_gap = current_ymin - prev_ymax
+    x_jump = abs(current_xmin - prev_xmin)
+    jumped_up = current_ymin < prev_ymin - line_height * 0.5
+
+    if y_gap > line_height * 0.5 or jumped_up or x_jump > line_height * 4:
+        return ".\n\n"
+
+    return " "
