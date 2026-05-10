@@ -8,4 +8,5 @@ backend/weights/*.pth
 # Node.js rác
 frontend/node_modules/
 frontend/dist/
+frontend/certs/
 .DS_Store

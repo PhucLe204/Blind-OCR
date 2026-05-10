@@ -17,6 +17,10 @@ CONF_THRESHOLD = float(os.getenv("DOCUMENT_DETECTOR_CONF", "0.25"))
 IMGSZ = int(os.getenv("DOCUMENT_DETECTOR_IMGSZ", "640"))
 MIN_AREA_RATIO = float(os.getenv("DOCUMENT_DETECTOR_MIN_AREA_RATIO", "0.03"))
 CROP_PADDING_RATIO = float(os.getenv("DOCUMENT_CROP_PADDING_RATIO", "0.04"))
+GUIDE_BLUR_THRESHOLD = float(os.getenv("DOCUMENT_GUIDE_BLUR_THRESHOLD", "80"))
+GUIDE_CENTER_TOLERANCE_RATIO = float(os.getenv("DOCUMENT_GUIDE_CENTER_TOLERANCE_RATIO", "0.12"))
+GUIDE_MIN_AREA_RATIO = float(os.getenv("DOCUMENT_GUIDE_MIN_AREA_RATIO", "0.18"))
+GUIDE_MAX_AREA_RATIO = float(os.getenv("DOCUMENT_GUIDE_MAX_AREA_RATIO", "0.90"))
 
 
 @lru_cache(maxsize=1)
@@ -79,6 +83,104 @@ def extract_document_region(image: np.ndarray) -> tuple[np.ndarray, dict[str, An
         "confidence": confidence,
         "bbox": [int(v) for v in bbox],
     }
+
+
+def analyze_document_frame(image: np.ndarray) -> dict[str, Any]:
+    """Return a short Vietnamese guidance message for camera alignment."""
+    if image is None or image.size == 0:
+        return _guide_response("invalid_image", "Không đọc được hình ảnh từ camera.")
+
+    image_h, image_w = image.shape[:2]
+    blur_score = _blur_score(image)
+    model = _load_model()
+    if model is None:
+        return _guide_response(
+            "detector_unavailable",
+            "Chưa tải được model định vị tài liệu. Hãy đặt tài liệu nằm đầy khung camera rồi bấm chụp.",
+            blur_score=blur_score,
+        )
+
+    try:
+        predictions = model.predict(
+            source=image,
+            conf=CONF_THRESHOLD,
+            imgsz=IMGSZ,
+            verbose=False,
+        )
+    except Exception as exc:
+        print(f"Document guide error: {exc}")
+        return _guide_response(
+            "detector_error",
+            "Chưa phân tích được khung hình. Giữ tài liệu trước camera và thử lại.",
+            blur_score=blur_score,
+        )
+
+    if not predictions:
+        return _guide_response(
+            "no_document",
+            "Chưa thấy tài liệu. Đưa tài liệu vào trước camera.",
+            blur_score=blur_score,
+        )
+
+    selected = _select_detection(predictions[0], image.shape[:2])
+    if selected is None:
+        return _guide_response(
+            "no_document",
+            "Chưa thấy tài liệu rõ. Đưa tài liệu vào giữa camera.",
+            blur_score=blur_score,
+        )
+
+    _, bbox, confidence = selected
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    doc_w = max(1.0, x2 - x1)
+    doc_h = max(1.0, y2 - y1)
+    doc_cx = x1 + doc_w / 2
+    doc_cy = y1 + doc_h / 2
+    frame_cx = image_w / 2
+    frame_cy = image_h / 2
+    dx = doc_cx - frame_cx
+    dy = doc_cy - frame_cy
+    tolerance_x = image_w * GUIDE_CENTER_TOLERANCE_RATIO
+    tolerance_y = image_h * GUIDE_CENTER_TOLERANCE_RATIO
+    area_ratio = (doc_w * doc_h) / float(max(1, image_w * image_h))
+
+    x_offset = abs(dx) / max(1.0, tolerance_x)
+    y_offset = abs(dy) / max(1.0, tolerance_y)
+
+    if x_offset >= y_offset and dx > tolerance_x:
+        message = "Đưa tài liệu sang trái."
+        status = "move_left"
+    elif x_offset >= y_offset and dx < -tolerance_x:
+        message = "Đưa tài liệu sang phải."
+        status = "move_right"
+    elif dy > tolerance_y:
+        message = "Đưa tài liệu lên trên."
+        status = "move_up"
+    elif dy < -tolerance_y:
+        message = "Đưa tài liệu xuống dưới."
+        status = "move_down"
+    elif area_ratio < GUIDE_MIN_AREA_RATIO:
+        message = "Đưa tài liệu lại gần camera hơn."
+        status = "too_far"
+    elif area_ratio > GUIDE_MAX_AREA_RATIO:
+        message = "Đưa tài liệu ra xa camera một chút."
+        status = "too_close"
+    elif blur_score < GUIDE_BLUR_THRESHOLD:
+        message = "Ảnh đang mờ. Giữ yên tài liệu."
+        status = "blurry"
+    else:
+        message = "Tài liệu đã rõ và nằm giữa khung. Giữ yên."
+        status = "ready"
+
+    return _guide_response(
+        status,
+        message,
+        capture_ready=status == "ready",
+        blur_score=blur_score,
+        area_ratio=area_ratio,
+        confidence=confidence,
+        bbox=[int(v) for v in bbox],
+    )
 
 
 def _select_detection(
@@ -237,6 +339,32 @@ def _clip_bbox(bbox: np.ndarray, image_w: int, image_h: int) -> tuple[int, int, 
     x2 = max(0, min(image_w, x2))
     y2 = max(0, min(image_h, y2))
     return x1, y1, x2, y2
+
+
+def _blur_score(image: np.ndarray) -> float:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def _guide_response(
+    status: str,
+    message: str,
+    *,
+    capture_ready: bool = False,
+    blur_score: float | None = None,
+    area_ratio: float | None = None,
+    confidence: float | None = None,
+    bbox: list[int] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "message": message,
+        "capture_ready": capture_ready,
+        "blur_score": blur_score,
+        "area_ratio": area_ratio,
+        "confidence": confidence,
+        "bbox": bbox,
+    }
 
 
 def _to_numpy(value: Any) -> np.ndarray:

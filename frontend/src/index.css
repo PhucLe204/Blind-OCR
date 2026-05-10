@@ -73,6 +73,47 @@ button:disabled {
   padding: 24px;
 }
 
+.scanner-shell {
+  min-height: 100svh;
+  display: flex;
+  background: #0f172a;
+  color: #ffffff;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.scanner-shell:focus-visible {
+  outline: 4px solid rgba(255, 255, 255, 0.7);
+  outline-offset: -6px;
+}
+
+.scanner-panel {
+  width: 100%;
+  min-height: 100svh;
+  display: grid;
+  grid-template-rows: minmax(260px, 1fr) auto auto auto;
+  gap: 12px;
+  padding: 12px;
+}
+
+.scanner-camera-stage {
+  position: relative;
+  min-height: 48svh;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #0f172a;
+}
+
+.scanner-guide,
+.scanner-status {
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.scanner-error {
+  padding: 0 4px;
+  color: #ffffff;
+}
+
 .reader-panel {
   width: min(760px, 100%);
   display: flex;
@@ -117,6 +158,10 @@ h1 {
   background: var(--warning);
 }
 
+.state.guiding {
+  background: var(--primary);
+}
+
 .camera-stage {
   position: relative;
   width: 100%;
@@ -150,6 +195,16 @@ h1 {
   gap: 10px;
 }
 
+.reader-actions,
+.scanner-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.scanner-actions {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.guide-box,
 .status-box,
 .shortcut-box {
   border-radius: 8px;
@@ -157,6 +212,16 @@ h1 {
   padding: 14px 16px;
   color: var(--muted);
   text-align: left;
+}
+
+.guide-box {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+}
+
+.guide-box strong {
+  color: var(--primary);
 }
 
 .status-box p,
@@ -168,6 +233,20 @@ h1 {
 .shortcut-box {
   display: grid;
   gap: 6px;
+}
+
+.result-box {
+  display: grid;
+  gap: 8px;
+}
+
+.result-box strong {
+  color: var(--primary);
+}
+
+.result-box p {
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 .error-text {
@@ -217,4 +296,97 @@ h1 {
   .actions {
     grid-template-columns: 1fr 1fr;
   }
+
+  .scanner-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .scanner-panel {
+    padding: 10px;
+  }
+}
+/* Computer Receiver Section (Hybrid) */
+.computer-receiver-section {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 2px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.receiver-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.receiver-header h3 {
+  margin: 0;
+  font-size: 20px;
+  color: var(--primary);
+}
+
+.status-tag {
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.status-tag.active {
+  background: rgba(20, 125, 75, 0.1);
+  color: var(--success);
+}
+
+.receiver-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.receiver-status-text {
+  font-size: 14px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.received-text-box {
+  min-height: 120px;
+  max-height: 250px;
+  overflow-y: auto;
+  padding: 16px;
+  background: #fdfdfd;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 18px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  color: var(--text);
+  transition: all 0.3s ease;
+}
+
+.received-text-box.has-text {
+  border-color: var(--primary);
+  background: #ffffff;
+  box-shadow: 0 4px 12px rgba(29, 78, 216, 0.05);
+}
+
+.receiver-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-small {
+  min-height: 40px;
+  padding: 0 16px;
+  font-size: 14px;
+}
+
+.btn-small.outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
 }
